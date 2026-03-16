@@ -485,13 +485,17 @@ def delete_email(
     conn: imaplib.IMAP4,
     uid: str,
     dry_run: bool,
-) -> None:
-    """Flag an email for deletion by UID."""
+) -> bool:
+    """Flag an email for deletion by UID. Returns True on success."""
     if dry_run:
         log.info("[DRY RUN] Would delete UID %s", uid)
-        return
-    conn.uid("store", uid, "+FLAGS", "(\\Deleted)")
+        return True
+    typ, data = conn.uid("store", uid, "+FLAGS", "(\\Deleted)")
+    if typ != "OK":
+        log.warning("Failed to mark UID %s for deletion: %s %s", uid, typ, data)
+        return False
     log.info("Marked UID %s for deletion", uid)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -534,8 +538,11 @@ def process_folder(
             delete_email(conn, uid, dry_run)
 
     if config.delete_after_archive and not dry_run:
-        conn.expunge()
-        log.debug("Expunged deleted messages in %s", folder)
+        typ, data = conn.expunge()
+        if typ != "OK":
+            log.warning("EXPUNGE failed for folder %s: %s %s", folder, typ, data)
+        else:
+            log.debug("Expunged deleted messages in %s", folder)
 
     return saved_count, email_count
 

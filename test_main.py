@@ -564,6 +564,7 @@ class TestProcessFolder:
         conn = MagicMock()
         conn.select.return_value = ("OK", [b"1"])
         conn.uid.side_effect = self._make_uid_side_effect(raw)
+        conn.expunge.return_value = ("OK", [])
 
         config = Config(
             imap=ImapConfig(server="x", username="x", password="x"),
