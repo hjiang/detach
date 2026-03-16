@@ -16,12 +16,16 @@ from unittest.mock import MagicMock, patch
 import pikepdf
 import pytest
 
+import socks
+
 from main import (
     Config,
     FiltersConfig,
     ImapConfig,
     _extract_search_terms,
     _match_sender,
+    _parse_proxy,
+    connect_imap,
     extract_pdf_attachments,
     fetch_matching_emails,
     list_matching_folders,
@@ -171,6 +175,57 @@ class TestLoadConfig:
         config.write_text('[imap]\nserver = "x"\n')
         with pytest.raises(KeyError):
             load_config(str(config))
+
+    def test_load_config_with_proxy(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(textwrap.dedent("""\
+            [imap]
+            server = "imap.test.com"
+            username = "user@test.com"
+            password = "pass123"
+            proxy = "socks5://proxy:1080"
+        """))
+        config = load_config(str(config_file))
+        assert config.imap.proxy_url == "socks5://proxy:1080"
+
+    def test_load_config_proxy_from_all_proxy_env(
+        self, minimal_config_file: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("all_proxy", "socks5://env-proxy:1080")
+        config = load_config(str(minimal_config_file))
+        assert config.imap.proxy_url == "socks5://env-proxy:1080"
+
+    def test_load_config_proxy_config_overrides_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(textwrap.dedent("""\
+            [imap]
+            server = "imap.test.com"
+            username = "user@test.com"
+            password = "pass123"
+            proxy = "socks5://config-proxy:1080"
+        """))
+        monkeypatch.setenv("all_proxy", "socks5://env-proxy:1080")
+        config = load_config(str(config_file))
+        assert config.imap.proxy_url == "socks5://config-proxy:1080"
+
+    def test_load_config_proxy_from_http_proxy_env(
+        self, minimal_config_file: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for var in ("all_proxy", "ALL_PROXY", "http_proxy", "HTTP_PROXY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("http_proxy", "http://proxy.corp.com:8080")
+        config = load_config(str(minimal_config_file))
+        assert config.imap.proxy_url == "http://proxy.corp.com:8080"
+
+    def test_load_config_no_proxy(
+        self, minimal_config_file: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for var in ("all_proxy", "ALL_PROXY", "http_proxy", "HTTP_PROXY"):
+            monkeypatch.delenv(var, raising=False)
+        config = load_config(str(minimal_config_file))
+        assert config.imap.proxy_url is None
 
 
 # ---------------------------------------------------------------------------
@@ -548,3 +603,73 @@ class TestProcessFolder:
             return ("OK", [])
 
         return side_effect
+
+
+# ---------------------------------------------------------------------------
+# Proxy parsing
+# ---------------------------------------------------------------------------
+
+class TestParseProxy:
+    def test_parse_proxy_socks5(self) -> None:
+        proxy_type, host, port, user, password = _parse_proxy(
+            "socks5://alice:secret@proxy.example.com:1080"
+        )
+        assert proxy_type == socks.SOCKS5
+        assert host == "proxy.example.com"
+        assert port == 1080
+        assert user == "alice"
+        assert password == "secret"
+
+    def test_parse_proxy_socks4_default_port(self) -> None:
+        proxy_type, host, port, user, password = _parse_proxy("socks4://proxy.example.com")
+        assert proxy_type == socks.SOCKS4
+        assert port == 1080
+        assert user is None
+        assert password is None
+
+    def test_parse_proxy_http(self) -> None:
+        proxy_type, host, port, user, password = _parse_proxy("http://proxy.corp.com")
+        assert proxy_type == socks.HTTP
+        assert port == 8080
+
+    def test_parse_proxy_invalid_scheme(self) -> None:
+        with pytest.raises(ValueError, match="Unsupported proxy scheme"):
+            _parse_proxy("ftp://proxy.corp.com:21")
+
+
+# ---------------------------------------------------------------------------
+# Proxy connection
+# ---------------------------------------------------------------------------
+
+class TestConnectImapWithProxy:
+    def test_connect_imap_with_proxy(self) -> None:
+        """socks.create_connection is called with the right proxy args."""
+        fake_sock = MagicMock()
+        fake_sock.makefile = MagicMock(return_value=MagicMock())
+
+        with patch("socks.create_connection", return_value=fake_sock) as mock_create, \
+             patch("imaplib.IMAP4.open"), \
+             patch("imaplib.IMAP4.login") as mock_login, \
+             patch("imaplib.IMAP4._create_socket", return_value=fake_sock):
+            config = ImapConfig(
+                server="imap.example.com",
+                port=143,
+                username="user",
+                password="pass",
+                use_ssl=False,
+                proxy_url="socks5://proxy.corp.com:1080",
+            )
+            # Patch at a higher level: skip actual network, just assert proxy plumbing
+            with patch("main._make_proxy_socket", return_value=fake_sock) as mock_proxy, \
+                 patch("imaplib.IMAP4.__init__", return_value=None), \
+                 patch("imaplib.IMAP4.login") as mock_login2:
+                from main import _ProxiedIMAP4
+                conn = _ProxiedIMAP4.__new__(_ProxiedIMAP4)
+                conn._proxy_url = "socks5://proxy.corp.com:1080"
+                conn.host = "imap.example.com"
+                conn.port = 143
+                sock = conn._create_socket(30)
+                mock_proxy.assert_called_once_with(
+                    "imap.example.com", 143, "socks5://proxy.corp.com:1080", 30
+                )
+                assert sock is fake_sock

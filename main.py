@@ -15,6 +15,8 @@ import imaplib
 import logging
 import os
 import re
+import socket
+import ssl
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -23,6 +25,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pikepdf
+import socks
 
 log = logging.getLogger("detach")
 
@@ -38,6 +41,7 @@ class ImapConfig:
     password: str
     port: int = 993
     use_ssl: bool = True
+    proxy_url: str | None = None  # e.g. "socks5://proxy.host:1080"
 
 
 @dataclass
@@ -70,6 +74,14 @@ def load_config(path: str, output_override: str | None = None) -> Config:
         password=imap_section["password"],
         port=imap_section.get("port", 993),
         use_ssl=imap_section.get("use_ssl", True),
+        proxy_url=(
+            imap_section.get("proxy")
+            or os.environ.get("all_proxy")
+            or os.environ.get("ALL_PROXY")
+            or os.environ.get("http_proxy")
+            or os.environ.get("HTTP_PROXY")
+            or None
+        ),
     )
 
     filters_section = raw.get("filters", {})
@@ -131,9 +143,80 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # IMAP helpers
 # ---------------------------------------------------------------------------
 
+def _parse_proxy(proxy_url: str) -> tuple[int, str, int, str | None, str | None]:
+    """Parse a proxy URL into (proxy_type, host, port, username, password)."""
+    from urllib.parse import urlparse
+    parsed = urlparse(proxy_url)
+    scheme = parsed.scheme.lower()
+    type_map = {"socks4": socks.SOCKS4, "socks5": socks.SOCKS5, "http": socks.HTTP}
+    if scheme not in type_map:
+        raise ValueError(f"Unsupported proxy scheme: {scheme!r}")
+    port = parsed.port or (1080 if "socks" in scheme else 8080)
+    return (type_map[scheme], parsed.hostname, port,
+            parsed.username or None, parsed.password or None)
+
+
+def _make_proxy_socket(
+    host: str,
+    port: int,
+    proxy_url: str,
+    timeout: float | None,
+) -> socket.socket:
+    """Create a TCP socket connected through the given proxy."""
+    proxy_type, proxy_host, proxy_port, proxy_user, proxy_pass = _parse_proxy(proxy_url)
+    sock = socks.create_connection(
+        (host, port),
+        proxy_type=proxy_type,
+        proxy_addr=proxy_host,
+        proxy_port=proxy_port,
+        proxy_username=proxy_user,
+        proxy_password=proxy_pass,
+        timeout=timeout,
+    )
+    return sock
+
+
+class _ProxiedIMAP4(imaplib.IMAP4):
+    """IMAP4 subclass that routes the connection through a proxy."""
+
+    def __init__(self, host: str, port: int, proxy_url: str) -> None:
+        self._proxy_url = proxy_url
+        super().__init__(host, port)
+
+    def _create_socket(self, timeout):
+        return _make_proxy_socket(self.host, self.port, self._proxy_url, timeout)
+
+
+class _ProxiedIMAP4SSL(imaplib.IMAP4_SSL):
+    """IMAP4_SSL subclass that routes the connection through a proxy."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        ssl_context: ssl.SSLContext,
+        proxy_url: str,
+    ) -> None:
+        self._proxy_url = proxy_url
+        super().__init__(host, port, ssl_context=ssl_context)
+
+    def _create_socket(self, timeout):
+        sock = _make_proxy_socket(self.host, self.port, self._proxy_url, timeout)
+        return self.ssl_context.wrap_socket(sock, server_hostname=self.host)
+
+
 def connect_imap(config: ImapConfig) -> imaplib.IMAP4 | imaplib.IMAP4_SSL:
     """Connect and authenticate to the IMAP server."""
-    if config.use_ssl:
+    if config.proxy_url:
+        log.debug("Connecting via proxy: %s", config.proxy_url)
+        if config.use_ssl:
+            conn = _ProxiedIMAP4SSL(
+                config.server, config.port,
+                ssl.create_default_context(), config.proxy_url,
+            )
+        else:
+            conn = _ProxiedIMAP4(config.server, config.port, config.proxy_url)
+    elif config.use_ssl:
         conn = imaplib.IMAP4_SSL(config.server, config.port)
     else:
         conn = imaplib.IMAP4(config.server, config.port)

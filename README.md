@@ -43,6 +43,7 @@ username = "user@example.com"
 password = "secret"
 port = 993        # optional, default 993
 use_ssl = true    # optional, default true
+# proxy = "socks5://proxy.host:1080"   # optional
 
 [filters]
 folder_patterns = ["INBOX", "Bills/*"]       # glob patterns
@@ -57,6 +58,26 @@ password = ""     # optional, for unlocking encrypted PDFs
 [behavior]
 delete_after_archive = false
 ```
+
+### Proxy support
+
+Route IMAP connections through a SOCKS4, SOCKS5, or HTTP CONNECT proxy.
+
+Set it explicitly in the config (takes priority over environment variables):
+
+```toml
+[imap]
+proxy = "socks5://user:pass@proxy.host:1080"
+```
+
+Or rely on the standard proxy environment variables as a fallback:
+
+```sh
+all_proxy=socks5://127.0.0.1:1080 uv run detach --dry-run
+```
+
+Supported env vars (checked in order): `all_proxy`, `ALL_PROXY`, `http_proxy`, `HTTP_PROXY`.
+Supported schemes: `socks4`, `socks5`, `http`.
 
 ### Output folder priority
 
