@@ -1,0 +1,13 @@
+[project]
+name = "detach"
+version = "0.1.0"
+description = "Email PDF attachment archiver"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["pikepdf>=9.0.0"]
+
+[project.scripts]
+detach = "main:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0.0"]

@@ -1,0 +1,19 @@
+[imap]
+server = "imap.example.com"
+username = "user@example.com"
+password = "secret"
+port = 993        # optional, default 993
+use_ssl = true    # optional, default true
+
+[filters]
+folder_patterns = ["INBOX", "Bills/*"]
+sender_patterns = ["*@bankofamerica.com", "billing@*"]
+
+[output]
+folder = "~/Documents/attachments"
+
+[pdf]
+password = ""     # optional, for unlocking encrypted PDFs
+
+[behavior]
+delete_after_archive = false
